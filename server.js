@@ -148,6 +148,13 @@ app.post("/webhook/carrinho", (req, res) => {
   try {
     const body = req.body;
  
+    // Ignora pedidos pagos
+    const statusPago = ["processing", "completed", "on-hold", "refunded"];
+    if (body.status && statusPago.includes(body.status)) {
+      console.log(`[WEBHOOK] Ignorado — pedido pago (status: ${body.status})`);
+      return res.json({ ok: true, ignored: true, reason: "pedido pago" });
+    }
+ 
     // Suporta formato do plugin "WooCommerce Abandoned Cart Lite"
     // e também formato customizado
     const cart = {
