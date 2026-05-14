@@ -84,7 +84,8 @@ function buildMessage(templateId, cart) {
 // ─── DISPARO VIA Z-API ────────────────────────────────────────
 async function sendWhatsApp(phone, message) {
   // Formata número: remove não-dígitos, garante código do país
-  let number = phone.replace(/\D/g, "");
+  let number = String(phone).replace(/\D/g, "");
+  if (number.length === 10 || number.length === 11) number = "55" + number;
   if (!number.startsWith("55")) number = "55" + number;
 
   try {
@@ -126,7 +127,7 @@ cron.schedule("*/5 * * * *", async () => {
 
       db.prepare(
         "INSERT INTO messages (cart_id, template_id, success, error) VALUES (?, ?, ?, ?)"
-      ).run(cart.id, step.templateId, result.success ? 1 : 0, result.error || null);
+      ).run(cart.id, step.templateId, result.success ? 1 : 0, result.error ? JSON.stringify(result.error).slice(0,500) : null);
 
       if (result.success) {
         db.prepare("UPDATE carts SET status = 'enviado' WHERE id = ?").run(cart.id);
@@ -222,9 +223,11 @@ app.post("/api/carts/:id/send", async (req, res) => {
   const message = buildMessage(templateId, cart);
   const result = await sendWhatsApp(cart.phone, message);
 
+  const errMsg = result.error ? JSON.stringify(result.error).slice(0, 500) : null;
+
   db.prepare(
     "INSERT INTO messages (cart_id, template_id, success, error) VALUES (?, ?, ?, ?)"
-  ).run(cart.id, templateId, result.success ? 1 : 0, result.error || null);
+  ).run(cart.id, templateId, result.success ? 1 : 0, errMsg);
 
   if (result.success) {
     db.prepare("UPDATE carts SET status = 'enviado' WHERE id = ?").run(cart.id);
