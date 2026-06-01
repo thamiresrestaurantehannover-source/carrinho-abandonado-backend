@@ -1,7 +1,7 @@
 /**
  * ============================================================
  *  RECUPERAÇÃO DE CARRINHO ABANDONADO — Backend Node.js
- *  Stack: Express + PostgreSQL + Z-API (WhatsApp)
+ *  Stack: Express + PostgreSQL + Meta WhatsApp Cloud API
  * ============================================================
  */
 
@@ -19,18 +19,18 @@ app.use(cors());
 const CONFIG = {
   PORT: process.env.PORT || 3001,
 
-  ZAPI_INSTANCE: process.env.ZAPI_INSTANCE || "SUA_INSTANCIA",
-  ZAPI_TOKEN:    process.env.ZAPI_TOKEN    || "SEU_TOKEN",
-  ZAPI_URL: (instance) =>
-    `https://api.z-api.io/instances/${instance}/token/${process.env.ZAPI_TOKEN}/send-text`,
+  // Meta WhatsApp Cloud API
+  WA_PHONE_ID:  process.env.WHATSAPP_PHONE_ID,   // 1141651309028631
+  WA_TOKEN:     process.env.WHATSAPP_TOKEN,       // token permanente
+  WA_API_URL:   `https://graph.facebook.com/v19.0`,
 
   SEQUENCE: [
-    { hoursAfter: 1,  templateId: 1, label: "Lembrete 1h"     },
-    { hoursAfter: 24, templateId: 2, label: "Cupom 10% — 24h" },
-    { hoursAfter: 48, templateId: 3, label: "Última chance"    },
+    { hoursAfter: 1,  templateName: "carrinho_lembrete_1h",  label: "Lembrete 1h"     },
+    { hoursAfter: 24, templateName: "carrinho_cupom_24h",    label: "Cupom 10% — 24h" },
+    { hoursAfter: 48, templateName: "carrinho_ultima_chance", label: "Última chance"   },
   ],
 
-  STORE_URL: process.env.STORE_URL || "https://sualoja.com.br",
+  STORE_URL: process.env.STORE_URL || "https://restaurantehannover.com.br",
 };
 
 // ─── BANCO DE DADOS (PostgreSQL) ──────────────────────────────
@@ -64,41 +64,48 @@ async function initDB() {
       success     INTEGER DEFAULT 1,
       error       TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS nps (
+      id         SERIAL PRIMARY KEY,
+      phone      TEXT NOT NULL,
+      name       TEXT NOT NULL,
+      nota       INTEGER,
+      feedback   TEXT,
+      created_at BIGINT DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT
+    );
   `);
   console.log("✅ Banco de dados PostgreSQL pronto.");
 }
 
-// ─── TEMPLATES DE MENSAGEM ────────────────────────────────────
-function buildMessage(templateId, cart) {
-  const firstName = cart.name.split(" ")[0];
-  const items = typeof cart.items === "string" ? JSON.parse(cart.items) : cart.items;
-  const itemList = items.map((i) => `• ${i.name}`).join("\n");
-  const total = parseFloat(cart.total).toFixed(2);
-  const url = cart.cart_url || `${CONFIG.STORE_URL}/carrinho`;
-
-  const templates = {
-    1: `Olá ${firstName}! 👋\n\nVocê deixou alguns itens no seu carrinho:\n\n🛒 ${itemList}\n\n💰 Total: R$ ${total}\n\nFinalize sua compra agora:\n${url}`,
-    2: `Oi ${firstName}! 🎁\n\nAinda pensando? Temos um presente pra você!\n\nUse o cupom *VOLTA10* e ganhe 10% de desconto no seu carrinho de R$ ${total}.\n\n⏰ Válido por 24h!\n\n👉 ${url}`,
-    3: `${firstName}, última chamada! ⚠️\n\nSeu carrinho expira hoje. Não perca seus itens reservados!\n\n🔗 ${url}\n\nQualquer dúvida, é só responder aqui. 😊`,
-  };
-
-  return templates[templateId] || templates[1];
-}
-
-// ─── DISPARO VIA Z-API ────────────────────────────────────────
-async function sendWhatsApp(phone, message) {
+// ─── FORMATAR NÚMERO ──────────────────────────────────────────
+function formatPhone(phone) {
   let number = String(phone).replace(/\D/g, "");
   if (number.length === 10 || number.length === 11) number = "55" + number;
   if (!number.startsWith("55")) number = "55" + number;
+  return number;
+}
+
+// ─── ENVIO VIA META CLOUD API — TEMPLATE ─────────────────────
+async function sendTemplate(phone, templateName, components = []) {
+  const number = formatPhone(phone);
 
   try {
     const response = await axios.post(
-      CONFIG.ZAPI_URL(CONFIG.ZAPI_INSTANCE),
-      { phone: number, message },
+      `${CONFIG.WA_API_URL}/${CONFIG.WA_PHONE_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: number,
+        type: "template",
+        template: {
+          name: templateName,
+          language: { code: "pt_BR" },
+          components: components.length > 0 ? components : undefined,
+        },
+      },
       {
         headers: {
           "Content-Type": "application/json",
-          "Client-Token": process.env.ZAPI_CLIENT_TOKEN || "",
+          "Authorization": `Bearer ${CONFIG.WA_TOKEN}`,
         },
         timeout: 10000,
       }
@@ -107,6 +114,81 @@ async function sendWhatsApp(phone, message) {
   } catch (err) {
     return { success: false, error: err.response?.data || err.message };
   }
+}
+
+// ─── ENVIO VIA META CLOUD API — TEXTO LIVRE ──────────────────
+// Só funciona dentro da janela de 24h após o cliente ter enviado mensagem
+async function sendText(phone, message) {
+  const number = formatPhone(phone);
+
+  try {
+    const response = await axios.post(
+      `${CONFIG.WA_API_URL}/${CONFIG.WA_PHONE_ID}/messages`,
+      {
+        messaging_product: "whatsapp",
+        to: number,
+        type: "text",
+        text: { body: message },
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${CONFIG.WA_TOKEN}`,
+        },
+        timeout: 10000,
+      }
+    );
+    return { success: true, data: response.data };
+  } catch (err) {
+    return { success: false, error: err.response?.data || err.message };
+  }
+}
+
+// ─── MONTAR COMPONENTES DO TEMPLATE CARRINHO ─────────────────
+function buildCartComponents(templateName, cart) {
+  const firstName = cart.name.split(" ")[0];
+  const total = parseFloat(cart.total).toFixed(2);
+  const url = cart.cart_url || `${CONFIG.STORE_URL}/carrinho`;
+
+  if (templateName === "carrinho_lembrete_1h") {
+    return [
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: firstName },
+          { type: "text", text: total },
+          { type: "text", text: url },
+        ],
+      },
+    ];
+  }
+
+  if (templateName === "carrinho_cupom_24h") {
+    return [
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: firstName },
+          { type: "text", text: total },
+          { type: "text", text: url },
+        ],
+      },
+    ];
+  }
+
+  if (templateName === "carrinho_ultima_chance") {
+    return [
+      {
+        type: "body",
+        parameters: [
+          { type: "text", text: firstName },
+          { type: "text", text: url },
+        ],
+      },
+    ];
+  }
+
+  return [];
 }
 
 // ─── CRON: verifica carrinhos a cada 5 minutos ────────────────
@@ -125,18 +207,19 @@ cron.schedule("*/5 * * * *", async () => {
 
       const { rows: already } = await pool.query(
         "SELECT id FROM messages WHERE cart_id = $1 AND template_id = $2",
-        [cart.id, step.templateId]
+        [cart.id, CONFIG.SEQUENCE.indexOf(step) + 1]
       );
       if (already.length > 0) continue;
 
-      const message = buildMessage(step.templateId, cart);
-      console.log(`[CRON] Disparando ${step.label} → ${cart.phone}`);
+      const templateId = CONFIG.SEQUENCE.indexOf(step) + 1;
+      const components = buildCartComponents(step.templateName, cart);
 
-      const result = await sendWhatsApp(cart.phone, message);
+      console.log(`[CRON] Disparando ${step.label} → ${cart.phone}`);
+      const result = await sendTemplate(cart.phone, step.templateName, components);
 
       await pool.query(
         "INSERT INTO messages (cart_id, template_id, success, error) VALUES ($1, $2, $3, $4)",
-        [cart.id, step.templateId, result.success ? 1 : 0, result.error ? JSON.stringify(result.error).slice(0, 500) : null]
+        [cart.id, templateId, result.success ? 1 : 0, result.error ? JSON.stringify(result.error).slice(0, 500) : null]
       );
 
       if (result.success) {
@@ -146,6 +229,92 @@ cron.schedule("*/5 * * * *", async () => {
         console.error(`[CRON] ✗ Falhou para ${cart.phone}:`, result.error);
       }
     }
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════
+//  WEBHOOK META — recebe respostas dos clientes (NPS)
+// ═══════════════════════════════════════════════════════════════
+
+// Verificação do webhook (GET)
+app.get("/webhook/meta", (req, res) => {
+  const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || "hannover_verify";
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("[META] Webhook verificado!");
+    return res.status(200).send(challenge);
+  }
+  res.sendStatus(403);
+});
+
+// Recebimento de mensagens (POST)
+app.post("/webhook/meta", async (req, res) => {
+  try {
+    const body = req.body;
+
+    if (body.object !== "whatsapp_business_account") return res.sendStatus(404);
+
+    const entry = body.entry?.[0];
+    const changes = entry?.changes?.[0];
+    const value = changes?.value;
+    const messages = value?.messages;
+
+    if (!messages || messages.length === 0) return res.sendStatus(200);
+
+    const msg = messages[0];
+    const phone = msg.from;
+    const contacts = value?.contacts;
+    const name = contacts?.[0]?.profile?.name || "Cliente";
+
+    // Resposta de botão (NPS)
+    if (msg.type === "interactive" && msg.interactive?.type === "button_reply") {
+      const buttonText = msg.interactive.button_reply.title;
+      console.log(`[NPS] ${name} (${phone}) respondeu: ${buttonText}`);
+
+      let nota = null;
+      if (buttonText.includes("8")) nota = 8;
+      else if (buttonText.includes("9")) nota = 9;
+      else if (buttonText.includes("10")) nota = 10;
+
+      if (nota) {
+        await pool.query(
+          "INSERT INTO nps (phone, name, nota) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+          [phone, name, nota]
+        );
+
+        if (nota === 10) {
+          // Agradece nota 10
+          await sendTemplate(phone, "nps_followup_promotor", [
+            { type: "body", parameters: [{ type: "text", text: name.split(" ")[0] }] },
+          ]);
+        } else {
+          // Pede motivo para notas 8 e 9
+          await sendTemplate(phone, "nps_followup_melhoria", [
+            { type: "body", parameters: [{ type: "text", text: name.split(" ")[0] }] },
+          ]);
+        }
+      }
+    }
+
+    // Resposta de texto livre (follow-up NPS)
+    if (msg.type === "text") {
+      const text = msg.text?.body;
+      console.log(`[MSG] ${name} (${phone}): ${text}`);
+
+      // Salva feedback no banco se tiver NPS pendente
+      await pool.query(
+        "UPDATE nps SET feedback = $1 WHERE phone = $2 AND feedback IS NULL ORDER BY created_at DESC LIMIT 1",
+        [text, phone]
+      );
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error("[META WEBHOOK] Erro:", err);
+    res.sendStatus(500);
   }
 });
 
@@ -202,6 +371,25 @@ app.post("/webhook/carrinho", async (req, res) => {
   }
 });
 
+// ── POST /api/nps/send ─────────────────────────────────────────
+app.post("/api/nps/send", async (req, res) => {
+  const { phone, name } = req.body;
+  if (!phone || !name) return res.status(400).json({ error: "phone e name obrigatórios" });
+
+  const firstName = name.split(" ")[0];
+  const result = await sendTemplate(phone, "nps_avaliacao", [
+    { type: "body", parameters: [{ type: "text", text: firstName }] },
+  ]);
+
+  res.json(result);
+});
+
+// ── GET /api/nps ───────────────────────────────────────────────
+app.get("/api/nps", async (req, res) => {
+  const { rows } = await pool.query("SELECT * FROM nps ORDER BY created_at DESC LIMIT 200");
+  res.json(rows);
+});
+
 // ── GET /api/carts ─────────────────────────────────────────────
 app.get("/api/carts", async (req, res) => {
   const { status } = req.query;
@@ -234,8 +422,11 @@ app.post("/api/carts/:id/send", async (req, res) => {
   if (!cart) return res.status(404).json({ error: "Carrinho não encontrado" });
 
   const { templateId = 1 } = req.body;
-  const message = buildMessage(templateId, cart);
-  const result = await sendWhatsApp(cart.phone, message);
+  const step = CONFIG.SEQUENCE[templateId - 1];
+  if (!step) return res.status(400).json({ error: "Template inválido" });
+
+  const components = buildCartComponents(step.templateName, cart);
+  const result = await sendTemplate(cart.phone, step.templateName, components);
 
   const errMsg = result.error ? JSON.stringify(result.error).slice(0, 500) : null;
 
@@ -289,8 +480,9 @@ app.get("/health", (req, res) => res.json({ ok: true, ts: new Date().toISOString
 initDB().then(() => {
   app.listen(CONFIG.PORT, () => {
     console.log(`\n🚀 Servidor rodando na porta ${CONFIG.PORT}`);
-    console.log(`📡 Webhook: POST http://localhost:${CONFIG.PORT}/webhook/carrinho`);
-    console.log(`📊 API:     GET  http://localhost:${CONFIG.PORT}/api/carts\n`);
+    console.log(`📡 Webhook carrinho: POST http://localhost:${CONFIG.PORT}/webhook/carrinho`);
+    console.log(`📡 Webhook Meta:     POST http://localhost:${CONFIG.PORT}/webhook/meta`);
+    console.log(`📊 API:              GET  http://localhost:${CONFIG.PORT}/api/carts\n`);
   });
 }).catch(err => {
   console.error("Erro ao inicializar banco:", err);
