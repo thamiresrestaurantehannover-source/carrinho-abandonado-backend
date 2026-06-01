@@ -20,8 +20,8 @@ const CONFIG = {
   PORT: process.env.PORT || 3001,
 
   // Meta WhatsApp Cloud API
-  WA_PHONE_ID:  process.env.WHATSAPP_PHONE_ID,   // 1141651309028631
-  WA_TOKEN:     process.env.WHATSAPP_TOKEN,       // token permanente
+  WA_PHONE_ID:  process.env.WHATSAPP_PHONE_ID,
+  WA_TOKEN:     process.env.WHATSAPP_TOKEN,
   WA_API_URL:   `https://graph.facebook.com/v19.0`,
 
   SEQUENCE: [
@@ -117,7 +117,6 @@ async function sendTemplate(phone, templateName, components = []) {
 }
 
 // ─── ENVIO VIA META CLOUD API — TEXTO LIVRE ──────────────────
-// Só funciona dentro da janela de 24h após o cliente ter enviado mensagem
 async function sendText(phone, message) {
   const number = formatPhone(phone);
 
@@ -157,7 +156,6 @@ function buildCartComponents(templateName, cart) {
         parameters: [
           { type: "text", text: firstName },
           { type: "text", text: total },
-          { type: "text", text: url },
         ],
       },
     ];
@@ -170,7 +168,6 @@ function buildCartComponents(templateName, cart) {
         parameters: [
           { type: "text", text: firstName },
           { type: "text", text: total },
-          { type: "text", text: url },
         ],
       },
     ];
@@ -205,13 +202,14 @@ cron.schedule("*/5 * * * *", async () => {
     for (const step of CONFIG.SEQUENCE) {
       if (hoursElapsed < step.hoursAfter) continue;
 
+      const templateId = CONFIG.SEQUENCE.indexOf(step) + 1;
+
       const { rows: already } = await pool.query(
         "SELECT id FROM messages WHERE cart_id = $1 AND template_id = $2",
-        [cart.id, CONFIG.SEQUENCE.indexOf(step) + 1]
+        [cart.id, templateId]
       );
       if (already.length > 0) continue;
 
-      const templateId = CONFIG.SEQUENCE.indexOf(step) + 1;
       const components = buildCartComponents(step.templateName, cart);
 
       console.log(`[CRON] Disparando ${step.label} → ${cart.phone}`);
@@ -236,7 +234,6 @@ cron.schedule("*/5 * * * *", async () => {
 //  WEBHOOK META — recebe respostas dos clientes (NPS)
 // ═══════════════════════════════════════════════════════════════
 
-// Verificação do webhook (GET)
 app.get("/webhook/meta", (req, res) => {
   const VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN || "hannover_verify";
   const mode = req.query["hub.mode"];
@@ -250,7 +247,6 @@ app.get("/webhook/meta", (req, res) => {
   res.sendStatus(403);
 });
 
-// Recebimento de mensagens (POST)
 app.post("/webhook/meta", async (req, res) => {
   try {
     const body = req.body;
@@ -281,17 +277,15 @@ app.post("/webhook/meta", async (req, res) => {
 
       if (nota) {
         await pool.query(
-          "INSERT INTO nps (phone, name, nota) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+          "INSERT INTO nps (phone, name, nota) VALUES ($1, $2, $3)",
           [phone, name, nota]
         );
 
         if (nota === 10) {
-          // Agradece nota 10
           await sendTemplate(phone, "nps_followup_promotor", [
             { type: "body", parameters: [{ type: "text", text: name.split(" ")[0] }] },
           ]);
         } else {
-          // Pede motivo para notas 8 e 9
           await sendTemplate(phone, "nps_followup_melhoria", [
             { type: "body", parameters: [{ type: "text", text: name.split(" ")[0] }] },
           ]);
@@ -304,7 +298,6 @@ app.post("/webhook/meta", async (req, res) => {
       const text = msg.text?.body;
       console.log(`[MSG] ${name} (${phone}): ${text}`);
 
-      // Salva feedback no banco se tiver NPS pendente
       await pool.query(
         "UPDATE nps SET feedback = $1 WHERE phone = $2 AND feedback IS NULL ORDER BY created_at DESC LIMIT 1",
         [text, phone]
@@ -322,7 +315,6 @@ app.post("/webhook/meta", async (req, res) => {
 //  ROTAS
 // ═══════════════════════════════════════════════════════════════
 
-// ── POST /webhook/carrinho ─────────────────────────────────────
 app.post("/webhook/carrinho", async (req, res) => {
   try {
     const body = req.body;
@@ -371,7 +363,6 @@ app.post("/webhook/carrinho", async (req, res) => {
   }
 });
 
-// ── POST /api/nps/send ─────────────────────────────────────────
 app.post("/api/nps/send", async (req, res) => {
   const { phone, name } = req.body;
   if (!phone || !name) return res.status(400).json({ error: "phone e name obrigatórios" });
@@ -384,13 +375,11 @@ app.post("/api/nps/send", async (req, res) => {
   res.json(result);
 });
 
-// ── GET /api/nps ───────────────────────────────────────────────
 app.get("/api/nps", async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM nps ORDER BY created_at DESC LIMIT 200");
   res.json(rows);
 });
 
-// ── GET /api/carts ─────────────────────────────────────────────
 app.get("/api/carts", async (req, res) => {
   const { status } = req.query;
   let query = "SELECT * FROM carts";
@@ -415,7 +404,6 @@ app.get("/api/carts", async (req, res) => {
   res.json(result);
 });
 
-// ── POST /api/carts/:id/send ───────────────────────────────────
 app.post("/api/carts/:id/send", async (req, res) => {
   const { rows } = await pool.query("SELECT * FROM carts WHERE id = $1", [req.params.id]);
   const cart = rows[0];
@@ -442,7 +430,6 @@ app.post("/api/carts/:id/send", async (req, res) => {
   res.json(result);
 });
 
-// ── PATCH /api/carts/:id/status ───────────────────────────────
 app.patch("/api/carts/:id/status", async (req, res) => {
   const { status } = req.body;
   const valid = ["pendente", "enviado", "recuperado", "falhou"];
@@ -452,7 +439,6 @@ app.patch("/api/carts/:id/status", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ── GET /api/stats ─────────────────────────────────────────────
 app.get("/api/stats", async (req, res) => {
   const [total, pendente, enviado, recuperado, valorRisco, valorRecuperado] = await Promise.all([
     pool.query("SELECT COUNT(*) as n FROM carts"),
@@ -473,7 +459,6 @@ app.get("/api/stats", async (req, res) => {
   });
 });
 
-// ── Health check ───────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 
 // ─── START ────────────────────────────────────────────────────
