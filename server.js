@@ -299,7 +299,7 @@ app.post("/webhook/meta", async (req, res) => {
       console.log(`[MSG] ${name} (${phone}): ${text}`);
 
       await pool.query(
-        "UPDATE nps SET feedback = $1 WHERE phone = $2 AND feedback IS NULL ORDER BY created_at DESC LIMIT 1",
+        "UPDATE nps SET feedback = $1 WHERE id = (SELECT id FROM nps WHERE phone = $2 AND feedback IS NULL ORDER BY created_at DESC LIMIT 1)",
         [text, phone]
       );
     }
