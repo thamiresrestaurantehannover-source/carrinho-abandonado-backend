@@ -146,40 +146,19 @@ async function sendText(phone, message) {
 // ─── MONTAR COMPONENTES DO TEMPLATE CARRINHO ─────────────────
 function buildCartComponents(templateName, cart) {
   const firstName = cart.name.split(" ")[0];
-  const total = parseFloat(cart.total).toFixed(2);
-  const url = cart.cart_url || `${CONFIG.STORE_URL}/carrinho`;
 
-  if (templateName === "carrinho_lembrete_1h") {
+  // Todos os templates aprovados na Meta usam apenas 1 variável no corpo: {{1}} = primeiro nome.
+  // (A URL e demais textos estão fixos no corpo do template, não são parâmetros.)
+  if (
+    templateName === "carrinho_lembrete_1h" ||
+    templateName === "carrinho_cupom_24h" ||
+    templateName === "carrinho_ultima_chance"
+  ) {
     return [
       {
         type: "body",
         parameters: [
           { type: "text", text: firstName },
-          { type: "text", text: total },
-        ],
-      },
-    ];
-  }
-
-  if (templateName === "carrinho_cupom_24h") {
-    return [
-      {
-        type: "body",
-        parameters: [
-          { type: "text", text: firstName },
-          { type: "text", text: total },
-        ],
-      },
-    ];
-  }
-
-  if (templateName === "carrinho_ultima_chance") {
-    return [
-      {
-        type: "body",
-        parameters: [
-          { type: "text", text: firstName },
-          { type: "text", text: url },
         ],
       },
     ];
